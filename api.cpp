@@ -3,11 +3,12 @@
 #include <opus.h>
 #include <iostream>
 #include <vector>
+#include <list>
 
 typedef std::string String;
 typedef std::vector<int16_t> Int16Array;
 
-class Encoder{
+class Encoder {
   public:
     Encoder(int _channels, long int _samplerate, long int _bitrate, float _frame_size, bool voice_optimization): enc(NULL), samplerate(_samplerate), channels(_channels), bitrate(_bitrate), frame_size(_frame_size)
     {
@@ -24,109 +25,110 @@ class Encoder{
         std::cerr << "[libopusjs] error while creating opus encoder (errcode " << err << ")" << std::endl;
     }
 
-    void input(const int16_t *data, int size)
+  void input(const int16_t *data, int size)
+  {
+    samples.insert(samples.end(), data, data + size);
+  }
+
+  bool output(String *out)
+  {
+    bool ok = false;
+    if (enc)
     {
-      std::vector<int16_t> nsamples(data, data+size);
-      samples.insert(samples.end(), nsamples.begin(), nsamples.end());
-    }
+      // compute the size of samples to read
+      long int n_samples = samplerate * (frame_size / 1000.0) * channels;
+      if (n_samples && samples.size() >= n_samples)
+      {
+        // initialize the ouput buffer
+        size_t max_size = n_samples / (float)samplerate * bitrate / 8 * 1.5;
+        out->resize(max_size);
 
-    bool output(String *out)
-    {
-      bool ok = false;
-      if(enc){
-        //compute the size of samples to read
-        long int n_samples = samplerate*(frame_size/1000.0)*channels;
-        if(samples.size() >= n_samples){
-          //initialize the ouput buffer
-          size_t max_size = n_samples/(float)samplerate*bitrate/8*1.5;
-          char *buffer = new char[max_size];
-
-          //convert samples to packets
-          long int packet_size = (n_samples > 0 ? opus_encode(enc, &samples[0], n_samples/channels, (unsigned char*)buffer, max_size) : 0);
-
-          if(packet_size > 0){
-            out->assign(buffer, packet_size);
-            ok = true;
-          }
-
-          //std::cout << samples.size() << " == " << n_samples << "(" << samples_per_multiple << ") " << (packet_size > 0 ? "success" : "failed") << std::endl;
-          delete [] buffer;
-          samples.erase(samples.begin(), samples.begin()+n_samples);
-        }
-      }
-      
-      return ok;
-    }
-
-    ~Encoder()
-    {
-      if(enc)
-        opus_encoder_destroy(enc);
-    }
-
-  private:
-    float frame_size;
-    long int bitrate, samplerate;
-    int channels;
-    OpusEncoder *enc;
-    std::vector<int16_t> samples;
-};
-
-class Decoder{
-  public:
-    Decoder(int _channels, long int _samplerate): dec(NULL), samplerate(_samplerate), channels(_channels)
-    {
-      int err;
-      dec = opus_decoder_create(samplerate, channels, &err);
-
-      if(dec == NULL)
-        std::cerr << "[libopusjs] error while creating opus decoder (errcode " << err << ")" << std::endl;
-    }
-
-    void input(const char *data, size_t size)
-    {
-      packets.push_back(std::string(data,size));
-    }
-
-    bool output(Int16Array *out)
-    {
-      bool ok = false;
-
-      if(packets.size() > 0 && dec != NULL){
-        int ret_size = 0;
-
-        long int buffer_size = 120/1000.0*samplerate*channels; //120ms max
-        int16_t *buffer = new int16_t[buffer_size];
-
-        //extract samples from packets
-        std::string &packet = packets[0];
-
-        if(packet.size() > 0)
-          ret_size = opus_decode(dec, (const unsigned char*)packet.c_str(), packet.size(), buffer, buffer_size/channels, 0);
-
-        if(ret_size > 0){
-          *out = std::vector<int16_t>(buffer, buffer+ret_size*channels);
+        // convert samples to packets
+        long int packet_size = opus_encode(enc, &samples[0], n_samples / channels,
+                                           (unsigned char *)out->data(), max_size);
+        if (packet_size > 0)
+        {
+          out->resize(packet_size);
           ok = true;
         }
 
-        packets.erase(packets.begin());
-        delete [] buffer;
+        // std::cout << samples.size() << " == " << n_samples << "(" << samples_per_multiple << ") " << (packet_size > 0 ? "success" : "failed") << std::endl;
+        samples.erase(samples.begin(), samples.begin() + n_samples);
       }
-
-      return ok;
     }
 
-    ~Decoder()
+    return ok;
+  }
+
+  ~Encoder()
+  {
+    if (enc)
+      opus_encoder_destroy(enc);
+  }
+
+private:
+  float frame_size;
+  long int bitrate, samplerate;
+  int channels;
+  OpusEncoder *enc;
+  std::vector<int16_t> samples;
+};
+
+class Decoder {
+public:
+  Decoder(int _channels, long int _samplerate): dec(NULL), samplerate(_samplerate), channels(_channels) {
+    int err;
+    dec = opus_decoder_create(samplerate, channels, &err);
+
+    if(dec == NULL)
+      std::cerr << "[libopusjs] error while creating opus decoder (errcode " << err << ")" << std::endl;
+  }
+
+  void input(const char *data, size_t size)
+  {
+    packets.push_back(std::string(data,size));
+  }
+
+  bool output(Int16Array *out)
+  {
+    bool ok = false;
+
+    if (packets.size() > 0 && dec != NULL)
     {
-      if(dec)
-        opus_decoder_destroy(dec);
+      int ret_size = 0;
+
+      long int buffer_size = 120 / 1000.0 * samplerate * channels; // 120ms max
+      out->resize(buffer_size);
+
+      // extract samples from packets
+      std::string packet = packets.front();
+      packets.pop_front();
+      if (packet.size() > 0)
+        ret_size = opus_decode(dec,
+                               (const unsigned char *)packet.c_str(), packet.size(),
+                               out->data(), buffer_size / channels, 0);
+
+      if (ret_size > 0)
+      {
+        out->resize(ret_size * channels);
+        ok = true;
+      }
     }
 
-  private:
-    long int samplerate;
-    int channels;
-    OpusDecoder *dec;
-    std::vector<std::string> packets;
+    return ok;
+  }
+
+  ~Decoder()
+  {
+    if (dec)
+      opus_decoder_destroy(dec);
+  }
+
+private:
+  long int samplerate;
+  int channels;
+  OpusDecoder *dec;
+  std::list<std::string> packets;
 };
 
 extern "C"{
